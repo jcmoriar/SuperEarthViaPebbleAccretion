@@ -1,8 +1,7 @@
 module PA
-
+using Gadfly
 using MKS
 # using Roots
-using Gadfly
 
 # Set global parameters
 ALPHA_VISCOSITY = 1e-4
@@ -236,6 +235,27 @@ function surfacedensity2mass(Σ, inner, outer; α=0)
 end
 
 
+
+function analyticcubicroot(a, b, c, d)
+    b = b/a
+    c = c/a
+    d = d/a
+    p = (3c-b^2)/3
+    q = (27d-9b*c+2b^3)/27
+    R = (p/3)^3 + (q/2)^2
+
+    if R < 0
+        ϕ = acosd(sqrt((q/2)^2/-(p/3)^3 ))
+        x0 = (-2*sign(q)*sqrt(-p/3))*cosd(ϕ/3+120.*0) - b/3
+        x1 = (-2*sign(q)*sqrt(-p/3))*cosd(ϕ/3+120.*1) - b/3
+        x2 = (-2*sign(q)*sqrt(-p/3))*cosd(ϕ/3+120.*2) - b/3
+        return(max(x0, x1, x2))
+        # println("$x0 $x1 $x2")
+    else
+        println("R > 0")
+    end
+end
+
 ############################################################################
 # Pebble Production and Surface Density
 ############################################################################
@@ -284,11 +304,13 @@ function pebbledensity(a, t; r0=PEBBLE_SIZE, ρ=PEBBLE_DENSITY, pebble_flux=noth
     if pebble_flux == nothing
         pebble_flux = pebbleproduction(t)
     end
-    r0 = min(dominantpebblesize(a, t), r0)
+    r0 = min(dominantpebblesize(a, t), r0)   #Depending on what region is being simulated this can be irrelevant and should be skipped for a faster code
 
     pebble_flux * 1000MEARTH/YEAR / (4π*a*100AU*stokes(r0, a, t, ρ=ρ)*100headwindvelocity(a))
     # pebble_flux * 1000MEARTH/YEAR / (4π*a*100AU*st*100headwindvelocity(a))
 end
+
+
 
 
 function pebbledensity_LJ(a, t)
@@ -377,10 +399,10 @@ end
 
 
 function positive_zero(f)
-    tol = 1e-10
+    tol = 1e-5
     error = 1e100
     best_min = 0
-    best_max = 1e5
+    best_max = 1e4
     x=0
     while abs(error) > tol
         x = (best_max + best_min)/2
@@ -404,11 +426,7 @@ function b_set(ζ, st):
     """
 
     f(x) = x^3 + x^2*(2.*ζ/3.) - (8*st)
-    # roots = fzeros(f)
-    # b = maximum(roots)
     b = positive_zero(f)
-    # println(b)
-    # b=.1
     st_crit = 12. / ζ^3
     b*exp(-((st/st_crit)^0.65))
     # f
@@ -577,11 +595,13 @@ function growth_rate(a, t, r_p, r0; e=0., α_t=ALPHA_VISCOSITY, ρ_pl=PROTOPLANE
     """
     b = impact_parameter(a, t, r_p, r0, ρ_pl=ρ_pl, ρ_peb=ρ_peb)
 
+
     v_rel = relative_velocity(a, b, r0, t, α_t=α_t, e=e)
     h_gas = 0.033(a^1.25) * AU * a  # meters
     h_solid = h_gas*sqrt(α_t/(α_t+stokes(r0, a, t)))
     # println(h_solid/1000.)
     Σ = pebbledensity(a, t, r0=r0, ρ=ρ_peb, pebble_flux=pebble_flux) * GRAM / CM^2 # MKS
+    # println(Σ)
     # Σ = pebbledensity_LJ(a, t)
     if h_solid > b
         # println("3-D")
@@ -596,9 +616,65 @@ function growth_rate(a, t, r_p, r0; e=0., α_t=ALPHA_VISCOSITY, ρ_pl=PROTOPLANE
 end
 
 
-###################################################################
-# Planetesimal mass function
-###################################################################
+function growth_rate_grid(min_size, max_size, n_sizes, inner_extent, outer_extent, n_annuli, t)
+    """ Calculate the protoplanet accretion rate divided by the inward pebble flux for a grid
+        of body sizes and distances from star at a given time t.
+
+        The relative velocity between pebbles and planetesimals is assumed to be dominated by
+        radial drift.
+
+        Args:
+            min_size: Minimum planetesimal size [km].
+            max_size: Maximum planetesimal size [km].
+            n_sizes: The number of size bins in the grid.
+            inner_extent: Innermost semi-major axis grid point [AU].
+            outer_extent: Outermost semi-major axis grid point [AU].
+            n_annuli: Number of semi-major axis bins in the grid.
+            t: Age of the disk [years].
+
+        Return:
+            A grid of growth rates divided by the inward pebble flux.
+
+    """
+    radii = [10^x for x=linspace(log10(min_size), log10(max_size), n_sizes)]
+    sma = [10^x for x=linspace(log10(inner_extent), log10(outer_extent), n_annuli)]
+    grid = Array(FloatingPoint, n_annuli, n_sizes)
+    for i=1:n_annuli
+        a = sma[i]
+
+
+        r0 = min(dominantpebblesize(a, t), PEBBLE_SIZE)
+
+
+        st = stokes(PEBBLE_SIZE, sma[i], t, ρ=PEBBLE_DENSITY)
+        v_k = (GRAV*MSUN/a/AU)^0.5
+        v_rel = eta(a)*v_k # drift velocity approximated for objects with low stokes numbers (≲ 0.1)
+        h_gas = 0.033(a^1.25) * AU * a  # meters
+        h_solid = h_gas*sqrt(ALPHA_VISCOSITY/(ALPHA_VISCOSITY+st))
+        pebbledensity_on_pebble_flux = 1000MEARTH/YEAR / (4π*a*100AU*st*100headwindvelocity(a)) * GRAM / CM^2
+        # println(pebbledensity_on_pebble_flux*pebbleproduction(t))
+
+        for j=1:n_sizes
+            r_p = radii[j]
+            α = alpha_p(a, PROTOPLANET_DENSITY)
+            ζ = zeta_w(PROTOPLANET_DENSITY, r_p, a)
+            b = impact_parameter_nondimensional(α, ζ, st)
+            r_hill = hill_radius(a, r_p, PROTOPLANET_DENSITY)
+            b=b*r_hill
+            if h_solid > b
+                # println("3-D")
+                ρ = pebbledensity_on_pebble_flux / 2h_solid
+                Ṁ = π*b*b*ρ*v_rel * YEAR / MEARTH
+            else
+                # println("2-D")
+                Ṁ = 2*b*pebbledensity_on_pebble_flux*v_rel * YEAR / MEARTH
+            end
+            grid[i,j] = Ṁ
+        end
+    end
+    grid
+end
+
 
 function total_accretion_rate(a, t, total_mass; num_bodies=0, body_size=0, pebble_flux=nothing)
     """ Calculate the total accretion rate of pebbles onto all num_bodies bodies.
@@ -676,6 +752,14 @@ type Protoplanet <: Accreter
 end
 
 
+function random_planetesimal_size()
+    """ Generate a random planetesimal size from a power law distribution."""
+    y = rand()
+    n=-5.5
+    ((MAX_PROTOPLANET_SIZE^(n+1) - MIN_PROTOPLANET_SIZE^(n+1))*y + MIN_PROTOPLANET_SIZE^(n+1))^(1/(n+1))
+end
+
+
 type Disk
     """ Container for all the accreting bodies in the disk.
 
@@ -721,6 +805,7 @@ function Disk(inner_edge::FloatingPoint, outer_edge::FloatingPoint, num_annuli::
     # Add the planetesimals
     for i = 1:num_annuli
         mass_in_annulus = surfacedensity2mass(INITIAL_SURFACE_DENSITY/2., annuli[i], annuli[i+1], α=α)
+        mass_in_annulus = 0
         planetesimal_ring = PlanetesimalFlock(annuli[i], annuli[i+1], mass_in_annulus, PLANETESIMAL_SIZE)
         append!(planetesimals, [planetesimal_ring])
     end
@@ -729,7 +814,8 @@ function Disk(inner_edge::FloatingPoint, outer_edge::FloatingPoint, num_annuli::
     sma = inner_edge
     i=0
     while sma < outer_edge
-        radius = rand()*(MAX_PROTOPLANET_SIZE - MIN_PROTOPLANET_SIZE) + MIN_PROTOPLANET_SIZE
+        # radius = rand()*(MAX_PROTOPLANET_SIZE - MIN_PROTOPLANET_SIZE) + MIN_PROTOPLANET_SIZE
+        radius = random_planetesimal_size()/2.
         mass = sphere_mass(radius, PROTOPLANET_DENSITY)/MEARTH
         Σ_mearth_per_au2 = INITIAL_SURFACE_DENSITY/2./1000MEARTH*100AU*100AU
         next_sma = (mass*(α+2)/2π/Σ_mearth_per_au2 + sma^(α+2))^(1./(α+2))
@@ -779,10 +865,43 @@ function accrete_pebbles!(disk::Disk, time, dt)
     """
     sort!(disk)
     pebble_flux = pebbleproduction(time)
-    printed=0
-    for i=length(disk.bodies):-1:1
-        accretion_rate = accrete_pebbles!(disk.bodies[i], time, dt, pebble_flux)
-        pebble_flux -= accretion_rate
+    if length(disk.protoplanets) < 10000
+        for i=length(disk.bodies):-1:1
+            accretion_rate = accrete_pebbles!(disk.bodies[i], time, dt, pebble_flux)
+            pebble_flux -= accretion_rate
+        end
+    else
+        # Determine the grid size and endpoints
+        approximateΔsma = 0.03
+        approximateΔsize = 0.04
+        max_sma = disk.protoplanets[end].sma
+        min_sma = disk.protoplanets[1].sma
+        num_sma = iround((log10(max_sma)-log10(min_sma))/approximateΔsma)
+        masses = [p.mass for p=disk.protoplanets]
+        min_size = sphere_radius(minimum(masses), PROTOPLANET_DENSITY)
+        max_size = sphere_radius(maximum(masses), PROTOPLANET_DENSITY)
+        num_sizes = iround((log10(max_size) - log10(min_size)) / approximateΔsize)
+        logdiff_sma = log10(max_sma/min_sma)
+        logmin_sma = log10(min_sma)
+        logdiff_size = log10(max_size/min_size)
+        logmin_size = log10(min_size)
+        # println("$num_sma $num_sizes")
+
+        # create grid
+        grid = growth_rate_grid(min_size, max_size, num_sizes, min_sma, max_sma, num_sma, time)
+        # loops through protoplanets and determine accretion rates
+        for i=length(disk.protoplanets):-1:1
+            p = disk.protoplanets[i]
+            sma_index = iround(log10(p.sma/min_sma)/logdiff_sma*(num_sma-1)+1)
+            this_size = sphere_radius(p.mass, PROTOPLANET_DENSITY)
+            size_index = round(log10(this_size/min_size)/logdiff_size*(num_sizes-1)+1)
+            Ṁ = pebble_flux*grid[sma_index, size_index]
+            p.mass += Ṁ*dt
+            pebble_flux -= Ṁ
+            if pebble_flux == 0
+                break
+            end
+        end
     end
     convert_planetesimals_to_embryos!(disk)
 end
@@ -863,14 +982,14 @@ function plot(disk::Disk; binned=false, title="")
     end
 
     if binned != false
-        protoplanet_sma = [planetesimal_sma, disk.planetesimals[end].outer_extent]
-        protoplanet_Σ = discrete_mass_to_surface_density(disk, protoplanet_sma)
+        protoplanet_sma = planetesimal_sma
+        protoplanet_Σ = discrete_mass_to_surface_density(disk, [protoplanet_sma, disk.planetesimals[end].outer_extent])
     end
 
     mmsn = [10*sma^-1.5 for sma in planetesimal_sma]
     mmen = [100*sma^-1.5 for sma in planetesimal_sma]
-    plot(layer(x=planetesimal_sma, y=planetesimal_Σ, Geom.line, color=["Planetesimals"]),
-         layer(x=protoplanet_sma, y=protoplanet_Σ, Geom.point, color=["Protoplanets"]),
+    plot(layer(x=protoplanet_sma, y=protoplanet_Σ, Geom.point, color=["Protoplanets"]),
+         # layer(x=planetesimal_sma, y=planetesimal_Σ, Geom.line, color=["Planetesimals"]),
          layer(x=planetesimal_sma, y=mmsn, Geom.line, color=["MMSN"], Theme(default_color=color("red"))),
          layer(x=planetesimal_sma, y=mmen, Geom.line, color=["MMEN"], Theme(default_color=color("purple"))),
          Guide.xlabel("Semi-major axis [AU]"), Guide.ylabel("Surface density [g/cm^2]"), Guide.title(title),
@@ -908,9 +1027,66 @@ function discrete_mass_to_surface_density(disk, bin_bounds)
     Σ = zeros(length(mass))
     for i=1:length(mass)
         Σ[i] = mass2surfacedensity(mass[i], bin_bounds[i], bin_bounds[i+1])
+        # println("$(mass[i]) $(bin_bounds[i]) $(bin_bounds[i+1]) $(Σ[i])")
     end
     Σ
 end
+
+
+function speedtest()
+    for i=1:1000000
+        x = growth_rate(1.,1e5, 100.,1.)
+    end
+end
+
+
+
+#################################################################################
+# Plotting
+#################################################################################
+
+
+function plot_surface_density()
+    PA.set_globals(pebble_density = 1e0,
+                   α_t = 1e-4,
+                   pebble_size = 1e0,
+                   min_protoplanet_size = 1e2,
+                   max_protoplanet_size = 5e2,
+                   protoplanet_density = 3e0,
+                   β_0 = 5e2,
+                   τ_dissipation = 3e6,
+                   dust_to_gas = 1e-2,
+                   initial_surface_density = 1e0,
+                   α_slope = -1.5 )
+    d = PA.Disk(0.05, 5., 50, 10.)
+
+    dirname = "/Users/johncmoriarty/AeroFS/Projects/Thesis/SuperEarthViaPebbleAccretion/movies/"
+
+
+
+    t=1e6
+    dt=1e2
+    for i=1:10000
+        println(i)
+        PA.accrete_pebbles!(d, t, dt)
+        t += dt
+
+        if i%100 == 0
+            p = PA.plot(d, title="Age: $t years")
+            filename = "Frame" * @sprintf "%04i" i/100
+            draw(PDF(dirname*filename*".pdf", 20cm, 12cm), p)
+        end
+    end
+
+
+
+    p = plot(d, binned=true)
+    dirname = "/Users/johncmoriarty/AeroFS/Projects/Thesis/Documents/Presentations/AAS2015/"
+    draw(PDF(dirname*"SurfaceDensity100YearTimeStep.pdf", 20cm, 12cm), p)
+end
+
+
+
 
 
 
