@@ -6,8 +6,8 @@ using MKS
 # Set global parameters
 ALPHA_VISCOSITY = 1e-4
 PEBBLE_SIZE = 1e0
-MIN_PROTOPLANET_SIZE = 1e3
-MAX_PROTOPLANET_SIZE = 2e3
+MIN_PROTOPLANET_SIZE = 1e2
+MAX_PROTOPLANET_SIZE = 5e2
 PROTOPLANET_DENSITY = 3e0
 PEBBLE_DENSITY = 2e0
 β0 = 5e2 #Initial gas surface density at 1AU [g/cm^2]
@@ -761,7 +761,6 @@ function random_planetesimal_size()
     ((MAX_PROTOPLANET_SIZE^(n+1) - MIN_PROTOPLANET_SIZE^(n+1))*y + MIN_PROTOPLANET_SIZE^(n+1))^(1/(n+1))
 end
 
-
 type Disk
     """ Container for all the accreting bodies in the disk.
 
@@ -773,29 +772,35 @@ type Disk
             protoplanets: Only the Protoplanet bodies.
 
     """
-    max_surface_density::FloatingPoint
-    bodies::Array{Accreter}
-    planetesimals::Array{PlanetesimalFlock}
     protoplanets::Array{Protoplanet}
     inner_edge::FloatingPoint
     outer_edge::FloatingPoint
 end
 
+function random_planetesimal_location(disk::Disk)
+    """ Generate a random planetesimal location following surface density profile."""
+    y = rand()
+    n=ALPHA_SLOPE+1
+    ((disk.outer_edge^(n+1) - disk.inner_edge^(n+1))*y + disk.inner_edge^(n+1))^(1/(n+1))
+end
 
 import Base.isless
 function isless(p1::Protoplanet, p2::Protoplanet)
     p1.mass < p2.mass
 end
 
-function Disk(inner_edge::FloatingPoint, outer_edge::FloatingPoint, num_annuli::Integer, max_surface_density)
+function EmptyDisk(inner_edge::FloatingPoint, outer_edge::FloatingPoint)
+    """Construct a Disk without any protoplanets."""
+    Disk(Protoplanet[], inner_edge, outer_edge)
+end
+
+
+function Disk(inner_edge::FloatingPoint, outer_edge::FloatingPoint)
     """ Constructor for type PlanetesimalDisk.
 
         Args:
             inner_edge: The inner edge of the planetesimals disk in AU.
             outer_edge: The outer edge of the planetesimals disk in AU.
-            num_annuli: Defines resolution of simulation.
-            max_surface_density: The threshold at which additional mass
-                is converted to a new planetary embryo.
 
         Returns:
             A new PlanetesimalDisk object.
@@ -803,18 +808,8 @@ function Disk(inner_edge::FloatingPoint, outer_edge::FloatingPoint, num_annuli::
     """
 
     α = ALPHA_SLOPE
-    planetesimals = PlanetesimalFlock[]
     protoplanets = Protoplanet[]
 
-    annuli = [10^loga for loga in linspace(log10(inner_edge), log10(outer_edge), num_annuli+1)]
-
-    # Add the planetesimals
-    for i = 1:num_annuli
-        mass_in_annulus = surfacedensity2mass(INITIAL_SURFACE_DENSITY/2., annuli[i], annuli[i+1], α=α)
-        mass_in_annulus = 0
-        planetesimal_ring = PlanetesimalFlock(annuli[i], annuli[i+1], mass_in_annulus, PLANETESIMAL_SIZE)
-        append!(planetesimals, [planetesimal_ring])
-    end
 
     # Add the protoplanets
     sma = inner_edge
@@ -823,14 +818,14 @@ function Disk(inner_edge::FloatingPoint, outer_edge::FloatingPoint, num_annuli::
     while sma < outer_edge
         radius = random_planetesimal_size()/2.
         mass = sphere_mass(radius, PROTOPLANET_DENSITY)/MEARTH
-        Σ_mearth_per_au2 = INITIAL_SURFACE_DENSITY/2./1000MEARTH*100AU*100AU
-        next_sma = (mass*(α+2)/2π/Σ_mearth_per_au2 + sma^(α+2))^(1./(α+2))
+        Σ_mearth_per_au2 = INITIAL_SURFACE_DENSITY/1000MEARTH*100AU*100AU
+        next_sma = (mass*(α+2)/2/π/Σ_mearth_per_au2 + sma^(α+2))^(1./(α+2))
         append!(protoplanets, [Protoplanet(rand()*(next_sma - sma) + sma, mass, 0)])
         sma = next_sma
         i+=1
     end
 
-    Disk(max_surface_density, [planetesimals, protoplanets], planetesimals, protoplanets, inner_edge, outer_edge) #random embryos for now
+    Disk(protoplanets, inner_edge, outer_edge) #random embryos for now
 end
 
 import Base.sort!
@@ -840,12 +835,10 @@ function sort!(disk::Disk; by=nothing)
 
     """
     sortkey(accreter) = accreter.sma
-    sort!(disk.bodies, by=sortkey)
-    sort!(disk.planetesimals, by=sortkey)
     sort!(disk.protoplanets, by=sortkey)
 end
 
-function accrete_pebbles!(disk::Disk, time, dt)
+function accrete_pebbles!(disk::Disk, time, dt; flux_reduction=0)
     """ Calculate the pebble accretion rate at each annulus and apply it for the provided time interval.
 
         Args:
@@ -855,10 +848,14 @@ function accrete_pebbles!(disk::Disk, time, dt)
 
     """
     # sort!(disk)
-    pebble_flux = pebbleproduction(time)
+    pebble_flux = pebbleproduction(time) - flux_reduction
+    if pebble_flux < 0
+        println("Pebble usage is more than pebble production")
+        pebble_flux=0
+    end
     if length(disk.protoplanets) < 10000
-        for i=length(disk.bodies):-1:1
-            accretion_rate = accrete_pebbles!(disk.bodies[i], time, dt, pebble_flux)
+        for i=length(disk.protoplanets):-1:1
+            accretion_rate = accrete_pebbles!(disk.protoplanets[i], time, dt, pebble_flux)
             pebble_flux -= accretion_rate
         end
     else
@@ -897,7 +894,6 @@ function accrete_pebbles!(disk::Disk, time, dt)
             end
         end
     end
-    convert_planetesimals_to_embryos!(disk)
 end
 
 function accrete_pebbles!(protoplanet::Protoplanet, time, dt, pebble_flux)
@@ -908,95 +904,41 @@ function accrete_pebbles!(protoplanet::Protoplanet, time, dt, pebble_flux)
     accretion_rate
 end
 
-
-function accrete_pebbles!(planetesimals::PlanetesimalFlock, time, dt, pebble_flux)
-    accretion_rate = total_accretion_rate(planetesimals.sma, time, planetesimals.mass,
-                                          body_size=planetesimals.body_size, pebble_flux=pebble_flux)
-    accretion_rate = min(accretion_rate, pebble_flux)
-    planetesimals.mass += accretion_rate * dt
-    # println("planetesimal ", accretion_rate/pebble_flux)
-    accretion_rate
-end
-
-
-function convert_planetesimals_to_embryos!(disk::Disk)
-    # If there is too much mass in planetesimals create a new embryo
-    # sort!(disk)
-    accumulated_mass = 0
-    inner_bound = disk.planetesimals[1].sma
-    included_annuli = Integer[]
-    excess_Σ = FloatingPoint[]
-    for i in 1:length(disk.planetesimals)
-        p = disk.planetesimals[i]
-        Σ = mass2surfacedensity(p.mass, p.sma, p.outer_extent)
-        if Σ > disk.max_surface_density
-            append!(included_annuli, [i])
-            append!(excess_Σ, [Σ-disk.max_surface_density])
-            accumulated_mass += surfacedensity2mass(Σ-disk.max_surface_density, p.sma, p.outer_extent)
-            if accumulated_mass > sphere_mass(MIN_PROTOPLANET_SIZE, PROTOPLANET_DENSITY)/MEARTH
-                num_bodies = iceil(accumulated_mass/sphere_mass(MAX_PROTOPLANET_SIZE, PROTOPLANET_DENSITY)/MEARTH)
-                for j in 1:num_bodies
-                    new_embryo = Protoplanet(rand()*(p.outer_extent - inner_bound)+inner_bound, accumulated_mass/num_bodies, 0)
-                    append!(disk.protoplanets, [new_embryo])
-                    append!(disk.bodies, [new_embryo])
-                end
-                for j in 1:length(included_annuli)
-                    index = included_annuli[j]
-                    disk.planetesimals[index].mass -= surfacedensity2mass(excess_Σ[j], disk.planetesimals[index].sma, disk.planetesimals[index].outer_extent)
-                end
-                included_annuli = Integer[]
-                excess_Σ = FloatingPoint[]
-                inner_bound = p.outer_extent
-            end
-        end
-    end
-end
-
 import Gadfly.plot
-function plot(disk::Disk; binned=false, title="")
-    # sort!(disk)
-    planetesimal_sma = Number[]
-    planetesimal_Σ = Number[]
-    for p in disk.planetesimals
-        Σ = mass2surfacedensity(p.mass, p.sma, p.outer_extent)
-        append!(planetesimal_sma, [p.sma])
-        append!(planetesimal_Σ, [Σ])
-    end
-    protoplanet_sma = Number[]
-    protoplanet_Σ = Number[]
-    for i in 1:length(disk.protoplanets)
-        if i < length(disk.protoplanets)
-            outer_extent = disk.protoplanets[i+1].sma
-        else
-            outer_extent = 2disk.protoplanets[i].sma - disk.protoplanets[i-1].sma
+function plot(disk::Disk; binned=true, title="")
+
+    if binned
+        protoplanet_sma = [exp(r) for r in linspace(log(disk.inner_edge), log(disk.outer_edge), 50)]
+        protoplanet_Σ = discrete_mass_to_surface_density(disk, protoplanet_sma)
+        pop!(protoplanet_sma)
+    else
+        protoplanet_sma = Number[]
+        protoplanet_Σ = Number[]
+        for i in 1:length(disk.protoplanets)
+            if i < length(disk.protoplanets)
+                outer_extent = disk.protoplanets[i+1].sma
+            else
+                outer_extent = 2disk.protoplanets[i].sma - disk.protoplanets[i-1].sma
+            end
+            Σ = mass2surfacedensity(disk.protoplanets[i].mass, disk.protoplanets[i].sma, outer_extent)
+            append!(protoplanet_sma, [disk.protoplanets[i].sma])
+            append!(protoplanet_Σ, [Σ])
         end
-        Σ = mass2surfacedensity(disk.protoplanets[i].mass, disk.protoplanets[i].sma, outer_extent)
-        append!(protoplanet_sma, [disk.protoplanets[i].sma])
-        append!(protoplanet_Σ, [Σ])
     end
 
-    if binned != false
-        protoplanet_sma = planetesimal_sma
-        protoplanet_Σ = discrete_mass_to_surface_density(disk, [protoplanet_sma, disk.planetesimals[end].outer_extent])
-    end
 
-    mmsn = [10*sma^-1.5 for sma in planetesimal_sma]
-    mmen = [100*sma^-1.5 for sma in planetesimal_sma]
-    println("hello")
+
+    mmsn = [10*sma^-1.5 for sma in protoplanet_sma]
+    mmen = [100*sma^-1.5 for sma in protoplanet_sma]
     poster_theme = Theme(line_width=3pt, panel_stroke=color("black"), major_label_color=color("white"),
                          minor_label_color=color("white"), key_label_color=color("white"),
                          key_title_color=color("white"), key_title_font_size=14pt, major_label_font_size=17pt, minor_label_font_size=12pt)
     plot(layer(x=protoplanet_sma, y=protoplanet_Σ, Geom.point, color=["Simulation"]),
-         # layer(x=planetesimal_sma, y=planetesimal_Σ, Geom.line, color=["Planetesimals"]),
-         layer(x=planetesimal_sma, y=mmsn, Geom.line, color=["MMSN"], Theme(default_color=color("red"), line_width=3pt)),
-         layer(x=planetesimal_sma, y=mmen, Geom.line, color=["10X MMSN"], Theme(default_color=color("purple"), line_width=3pt)),
+         layer(x=protoplanet_sma, y=mmsn, Geom.line, color=["MMSN"]),
+         layer(x=protoplanet_sma, y=mmen, Geom.line, color=["10X MMSN"]),
          Guide.xlabel("Semi-major axis [AU]"), Guide.ylabel("Surface density [g/cm^2]"), Guide.title(title),
          Scale.y_log10(minvalue=1e-2, maxvalue=1e5), Scale.x_log10, Guide.colorkey(""),
          poster_theme)
-
-
-    # df1 = DataFrame(x=planetesimal_sma, y=planetesimal_Σ, )
-
 
 end
 
@@ -1030,17 +972,32 @@ function discrete_mass_to_surface_density(disk, bin_bounds)
 end
 
 
-function speedtest()
-    x = zeros(500000)
-    println(typeof(x))
-    for i=1:10000000
-        # append!(x, [1])
-        splice!(x, 2:1, [4])
-        y=x[250000]
+function form_planetesimals!(disk::Disk, total_mass)
+    """ Add new planetesimals to the disk.
+
+    Over time new planetesimals will form. This function
+    places them according to the global surface density
+    distribution and with the global planetesimal size
+    distribution. The rate of new planetesimal formation
+    is controlled by adding the appropriate amount of mass
+    (the total_mass) in new planetesimals at a given time
+    step.
+
+    """
+    mass_added = 0
+    while mass_added < total_mass
+        new_planetesimal_mass = min(sphere_mass(random_planetesimal_size()/2, PROTOPLANET_DENSITY)/MEARTH, total_mass - mass_added)
+        mass_added += new_planetesimal_mass
+        new_planetesimal_location = random_planetesimal_location(disk)
+        append!(disk.protoplanets, [Protoplanet(new_planetesimal_location, new_planetesimal_mass, 0)])
     end
+    sort!(disk)
 end
 
 
+##########################################################
+# I/O
+##########################################################
 function writeline_surfacedensity(disk::Disk, time, file_stream; num_bins=50)
     bin_bounds = exp(linspace(log(disk.inner_edge), log(disk.outer_edge), num_bins))
     Σ = discrete_mass_to_surface_density(disk, bin_bounds)
@@ -1167,12 +1124,12 @@ function runsimset()
        Remember that if you don't explicity set all globals for each setup
        they will revert to their default values."""
     set_globals(pebble_density = 1e0,
-                α_t = 1e-4,
+                α_t = 1e-3,
                 pebble_size = 1e0,
                 min_protoplanet_size = 1e2,
                 max_protoplanet_size = 5e2,
                 protoplanet_density = 3e0,
-                β_0 = 1e2,
+                β_0 = 5e2,
                 τ_dissipation = 3e6,
                 dust_to_gas = 1e-2,
                 initial_surface_density = 1e0,
@@ -1184,18 +1141,19 @@ function runsimset()
     β0s = [1e1, 5e1, 1e2, 5e2, 1e3, 5e3, 1e4]
     for Σ in Σ0s
         set_globals(pebble_density = 1e0,
-                    α_t = 1e-4,
+                    α_t = 1e-3,
                     pebble_size = 1e0,
                     min_protoplanet_size = 1e2,
                     max_protoplanet_size = 5e2,
                     protoplanet_density = 3e0,
-                    β_0 = 1e2,
+                    β_0 = 5e2,
                     τ_dissipation = 3e6,
                     dust_to_gas = 1e-2,
                     initial_surface_density = Σ,
                     α_slope = -1.5 )
         d = Disk(0.05, 5., 50, 10.)
         filename = "../data/initialplanetesimalmass/$Σ"
+        flux_filename = "../data/initialplanetesimalmass/$Σ\_flux"
         f = open(filename, "w")
         write_header(f)
         writeline_surfacedensity(d, 0., f, num_bins=100)
@@ -1217,6 +1175,37 @@ function runsimset()
     end
 end
 
+function run_continuous_planetesimal_formation()
+
+
+
+    total_mass = surfacedensity2mass(1e1, 0.05, 5.0, α=-1.5)
+    d = EmptyDisk(0.05, 5.0)
+    t_0 = 1e5
+    t_end = 3e6
+    Δt = 1e3
+    num_steps = (t_end - t_0) / Δt
+    t = t_0
+
+
+    filename = "../data/continuousformation/trial_run.dat"
+    f = open(filename, "w")
+    write_header(f)
+    writeline_surfacedensity(d, 0., f, num_bins=100)
+    close(f)
+    f = open(filename, "a")
+
+
+    while t < t_end
+        print("\r $t")
+        form_planetesimals!(d, total_mass/num_steps)
+        accrete_pebbles!(d, t, Δt, flux_reduction=total_mass/num_steps/Δt)
+        writeline_surfacedensity(d, t, f, num_bins=100)
+        t += Δt
+    end
+    plot(d)
+
+end
 
 end
 
