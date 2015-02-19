@@ -1,6 +1,7 @@
 module PA
 using Gadfly
 using MKS
+using Grid
 # using Roots
 
 # Set global parameters
@@ -775,6 +776,8 @@ type Disk
     protoplanets::Array{Protoplanet}
     inner_edge::FloatingPoint
     outer_edge::FloatingPoint
+    _inward_flux_loc
+    _inward_flux
 end
 
 function random_planetesimal_location(disk::Disk)
@@ -791,7 +794,9 @@ end
 
 function EmptyDisk(inner_edge::FloatingPoint, outer_edge::FloatingPoint)
     """Construct a Disk without any protoplanets."""
-    Disk(Protoplanet[], inner_edge, outer_edge)
+    inward_flux_loc = [exp(log_sma) for log_sma in linspace(log(inner_edge), log(outer_edge), 1000)]
+    inward_flux = zeros(1000)
+    Disk(Protoplanet[], inner_edge, outer_edge, inward_flux_loc, inward_flux)
 end
 
 
@@ -824,8 +829,17 @@ function Disk(inner_edge::FloatingPoint, outer_edge::FloatingPoint)
         sma = next_sma
         i+=1
     end
+    inward_flux_loc = [exp(log_sma) for log_sma in linspace(log(inner_edge), log(outer_edge), 1000)]
+    inward_flux = zeros(1000)
+    Disk(protoplanets, inner_edge, outer_edge, inward_flux_loc, inward_flux) #random embryos for now
+end
 
-    Disk(protoplanets, inner_edge, outer_edge) #random embryos for now
+function totalmass(disk::Disk)
+    mass = 0
+    for p in disk.protoplanets
+        mass +=p.mass
+    end
+    mass
 end
 
 import Base.sort!
@@ -849,6 +863,8 @@ function accrete_pebbles!(disk::Disk, time, dt; flux_reduction=0)
     """
     # sort!(disk)
     pebble_flux = pebbleproduction(time) - flux_reduction
+    total_pebble_mass = pebble_flux*dt
+    accreted_mass = 0
     if pebble_flux < 0
         println("Pebble usage is more than pebble production")
         pebble_flux=0
@@ -857,6 +873,7 @@ function accrete_pebbles!(disk::Disk, time, dt; flux_reduction=0)
         for i=length(disk.protoplanets):-1:1
             accretion_rate = accrete_pebbles!(disk.protoplanets[i], time, dt, pebble_flux)
             pebble_flux -= accretion_rate
+            accreted_mass += accretion_rate*dt
         end
     else
         # Determine the grid size and endpoints
@@ -878,8 +895,13 @@ function accrete_pebbles!(disk::Disk, time, dt; flux_reduction=0)
         # create grid
         grid = growth_rate_grid(min_size, max_size, num_sizes, min_sma, max_sma, num_sma, time)
         # loops through protoplanets and determine accretion rates
+        influx_index = 1000
+        disk._inward_flux[influx_index] = pebble_flux
         for i=length(disk.protoplanets):-1:1
             p = disk.protoplanets[i]
+            if p.sma < disk._inward_flux_loc[influx_index]
+                influx_index -= 1
+            end
             sma_index = iround(log10(p.sma/min_sma)/logdiff_sma*(num_sma-1)+1)
             this_size = sphere_radius(p.mass, PROTOPLANET_DENSITY)
             size_index = round(log10(this_size/min_size)/logdiff_size*(num_sizes-1)+1)
@@ -888,12 +910,15 @@ function accrete_pebbles!(disk::Disk, time, dt; flux_reduction=0)
             end
             Ṁ = pebble_flux*grid[sma_index, size_index]
             p.mass += Ṁ*dt
+            accreted_mass += Ṁ*dt
             pebble_flux -= Ṁ
+            disk._inward_flux[influx_index] = pebble_flux
             if pebble_flux == 0
                 break
             end
         end
     end
+    return(accreted_mass, total_pebble_mass)
 end
 
 function accrete_pebbles!(protoplanet::Protoplanet, time, dt, pebble_flux)
@@ -1003,6 +1028,21 @@ function writeline_surfacedensity(disk::Disk, time, file_stream; num_bins=50)
     Σ = discrete_mass_to_surface_density(disk, bin_bounds)
     writedlm(file_stream, transpose([time, reshape(transpose([Σ bin_bounds[1:end-1]]), length(Σ)*2)]))
 end
+
+function writeline_inwardflux(disk::Disk, time, file_stream; num_bins=50, header=false)
+    interp = InterpIrregular(float(disk._inward_flux_loc), float(disk._inward_flux), BCna, InterpLinear)
+    sma = exp(linspace(log(disk.inner_edge), log(disk.outer_edge), num_bins))
+    pop!(sma)
+    influx = interp[sma]
+    if header
+        writedlm(file_stream, transpose(["time", map(string, sma)]))
+    else
+        writedlm(file_stream, transpose([time, influx]))
+    end
+end
+
+
+
 
 
 function writeline(disk::Disk, time, file_stream)
@@ -1151,27 +1191,39 @@ function runsimset()
                     dust_to_gas = 1e-2,
                     initial_surface_density = Σ,
                     α_slope = -1.5 )
-        d = Disk(0.05, 5., 50, 10.)
+        d = Disk(0.05, 5.)
         filename = "../data/initialplanetesimalmass/$Σ"
         flux_filename = "../data/initialplanetesimalmass/$Σ\_flux"
         f = open(filename, "w")
+        f_flux = open(flux_filename, "w")
         write_header(f)
         writeline_surfacedensity(d, 0., f, num_bins=100)
+        writeline_inwardflux(d, 0., f_flux, num_bins=100, header=true)
+        writeline_inwardflux(d, 0., f_flux, num_bins=100)
         close(f)
+        close(f_flux)
         f = open(filename, "a")
+        f_flux = open(flux_filename, "a")
         t=1e5
         dt=1e3
         s = [p.mass for p=d.protoplanets]
         m = minimum(s)
         M = maximum(s)
+        am = 0
+        pm = 0
         for i=1:1000
             print("\r $i")
-            PA.accrete_pebbles!(d, t, dt)
-            PA.writeline_surfacedensity(d, t, f, num_bins=100)
+            a, p = accrete_pebbles!(d, t, dt)
+            am += a
+            pm += p
+            writeline_surfacedensity(d, t, f, num_bins=100)
+            writeline_inwardflux(d, t, f_flux, num_bins=100)
             t += dt
         end
         close(f)
-
+        close(f_flux)
+        println("")
+        println("Total mass in pebbles: $pm Mass accreted: $am")
     end
 end
 
