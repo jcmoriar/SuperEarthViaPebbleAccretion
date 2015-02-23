@@ -2,7 +2,6 @@ module PA
 using Gadfly
 using MKS
 using Grid
-# using Roots
 
 # Set global parameters
 ALPHA_VISCOSITY = 1e-4
@@ -1175,25 +1174,25 @@ function runsimset()
                 initial_surface_density = 1e0,
                 α_slope = -1.5 )
 
-    p_sizes=[0.1, 0.5, 1.0, 5.0, 10.0]
-    Σ0s = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1]
-    pl_sizes = [100., 200., 300., 500., 1000., 1500.]
+    # p_sizes=[0.1, 0.5, 1.0, 5.0, 10.0]
+    # Σ0s = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1]
+    # pl_sizes = [100., 200., 300., 500., 1000., 1500.]
     β0s = [1e1, 5e1, 1e2, 5e2, 1e3, 5e3, 1e4]
-    for Σ in Σ0s
+    for β0 in β0s
         set_globals(pebble_density = 1e0,
                     α_t = 1e-3,
                     pebble_size = 1e0,
                     min_protoplanet_size = 1e2,
                     max_protoplanet_size = 5e2,
                     protoplanet_density = 3e0,
-                    β_0 = 5e2,
+                    β_0 = β0,
                     τ_dissipation = 3e6,
                     dust_to_gas = 1e-2,
-                    initial_surface_density = Σ,
+                    initial_surface_density = 1e0,
                     α_slope = -1.5 )
         d = Disk(0.05, 5.)
-        filename = "../data/initialplanetesimalmass/$Σ"
-        flux_filename = "../data/initialplanetesimalmass/$Σ\_flux"
+        filename = "../data/gasdiskmass/$β0"
+        flux_filename = "../data/gasdiskmass/$β0\_flux"
         f = open(filename, "w")
         f_flux = open(flux_filename, "w")
         write_header(f)
